@@ -1447,6 +1447,27 @@ class Transport(virtual.Transport):
         def _on_disconnect(connection):
             if connection._sock:
                 loop.remove(connection._sock)
+                # Also prune this connection's file descriptor from the
+                # poller's internal fd map so that on_poll_start does not
+                # re-register stale/disconnected sockets on the next tick.
+                fd = None
+                sock = connection._sock
+                try:
+                    if hasattr(sock, "fileno"):
+                        fd = sock.fileno()
+                    else:
+                        fd = sock
+                except OSError:
+                    # Socket may already be closed; in that case there is
+                    # nothing further for us to clean up here.
+                    fd = None
+                if fd is not None and hasattr(cycle, "_fd_to_chan"):
+                    fd_to_chan = cycle._fd_to_chan
+                    try:
+                        del fd_to_chan[fd]
+                    except KeyError:
+                        # If the fd is not tracked, we have nothing to prune.
+                        pass
             # Note: we intentionally do NOT remove on_poll_start from
             # loop.on_tick here.  on_poll_start is idempotent — when there
             # are no active file descriptors it simply does nothing.
