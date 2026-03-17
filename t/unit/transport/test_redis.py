@@ -1225,6 +1225,120 @@ class test_Channel:
         # on_poll_start must remain registered regardless of fds state
         assert len(loop.on_tick) == 1
 
+    def test_register_with_event_loop__on_disconnect__removes_sock(self):
+        """Ensure _on_disconnect removes the socket from the event loop.
+
+        When connection._sock is set, _on_disconnect must call loop.remove()
+        on it and prune the fd from cycle._fd_to_chan when present.
+        """
+        transport = self.connection.transport
+        mock_sock = Mock(name='sock')
+        mock_sock.fileno.return_value = 42
+        self.connection._sock = mock_sock
+        transport.cycle = Mock(name='cycle', spec=['fds', '_fd_to_chan',
+                                                   'on_poll_init',
+                                                   'on_poll_start',
+                                                   'maybe_restore_messages',
+                                                   'maybe_check_subclient_health',
+                                                   '_on_connection_disconnect'])
+        transport.cycle.fds = {}
+        transport.cycle._fd_to_chan = {42: Mock(name='chan')}
+        conn = Mock(name='conn')
+        conn.client = Mock(name='client', transport_options={})
+        loop = Mock(name='loop')
+        loop.on_tick = set()
+        redis.Transport.register_with_event_loop(transport, conn, loop)
+        transport.cycle._on_connection_disconnect(self.connection)
+        loop.remove.assert_called_once_with(mock_sock)
+        # fd must be pruned from _fd_to_chan
+        assert 42 not in transport.cycle._fd_to_chan
+        # on_poll_start must still be registered after disconnect
+        assert len(loop.on_tick) == 1
+
+    def test_register_with_event_loop__on_disconnect__sock_no_fileno(self):
+        """Ensure _on_disconnect handles sockets without a fileno() method.
+
+        When connection._sock has no fileno() (e.g. a raw fd integer),
+        the fd itself is used as the key to prune from cycle._fd_to_chan.
+        """
+        transport = self.connection.transport
+        # Use a plain integer as the "sock" (no fileno attribute)
+        self.connection._sock = 99
+        transport.cycle = Mock(name='cycle', spec=['fds', '_fd_to_chan',
+                                                   'on_poll_init',
+                                                   'on_poll_start',
+                                                   'maybe_restore_messages',
+                                                   'maybe_check_subclient_health',
+                                                   '_on_connection_disconnect'])
+        transport.cycle.fds = {}
+        transport.cycle._fd_to_chan = {99: Mock(name='chan')}
+        conn = Mock(name='conn')
+        conn.client = Mock(name='client', transport_options={})
+        loop = Mock(name='loop')
+        loop.on_tick = set()
+        redis.Transport.register_with_event_loop(transport, conn, loop)
+        transport.cycle._on_connection_disconnect(self.connection)
+        loop.remove.assert_called_once_with(99)
+        assert 99 not in transport.cycle._fd_to_chan
+        assert len(loop.on_tick) == 1
+
+    def test_register_with_event_loop__on_disconnect__fileno_oserror(self):
+        """Ensure _on_disconnect handles OSError from fileno() gracefully.
+
+        When the socket is already closed, fileno() raises OSError.
+        _on_disconnect should swallow it and skip _fd_to_chan pruning.
+        """
+        transport = self.connection.transport
+        mock_sock = Mock(name='sock')
+        mock_sock.fileno.side_effect = OSError('Bad file descriptor')
+        self.connection._sock = mock_sock
+        transport.cycle = Mock(name='cycle', spec=['fds', '_fd_to_chan',
+                                                   'on_poll_init',
+                                                   'on_poll_start',
+                                                   'maybe_restore_messages',
+                                                   'maybe_check_subclient_health',
+                                                   '_on_connection_disconnect'])
+        transport.cycle.fds = {}
+        transport.cycle._fd_to_chan = {}
+        conn = Mock(name='conn')
+        conn.client = Mock(name='client', transport_options={})
+        loop = Mock(name='loop')
+        loop.on_tick = set()
+        redis.Transport.register_with_event_loop(transport, conn, loop)
+        # Must not raise even though fileno() raises OSError
+        transport.cycle._on_connection_disconnect(self.connection)
+        loop.remove.assert_called_once_with(mock_sock)
+        assert len(loop.on_tick) == 1
+
+    def test_register_with_event_loop__on_disconnect__fd_not_in_map(self):
+        """Ensure _on_disconnect handles missing fd in _fd_to_chan gracefully.
+
+        If the fd is not tracked (already removed), the KeyError must be
+        swallowed silently.
+        """
+        transport = self.connection.transport
+        mock_sock = Mock(name='sock')
+        mock_sock.fileno.return_value = 55
+        self.connection._sock = mock_sock
+        transport.cycle = Mock(name='cycle', spec=['fds', '_fd_to_chan',
+                                                   'on_poll_init',
+                                                   'on_poll_start',
+                                                   'maybe_restore_messages',
+                                                   'maybe_check_subclient_health',
+                                                   '_on_connection_disconnect'])
+        transport.cycle.fds = {}
+        # fd 55 is NOT in _fd_to_chan — KeyError must be silently ignored
+        transport.cycle._fd_to_chan = {}
+        conn = Mock(name='conn')
+        conn.client = Mock(name='client', transport_options={})
+        loop = Mock(name='loop')
+        loop.on_tick = set()
+        redis.Transport.register_with_event_loop(transport, conn, loop)
+        # Must not raise
+        transport.cycle._on_connection_disconnect(self.connection)
+        loop.remove.assert_called_once_with(mock_sock)
+        assert len(loop.on_tick) == 1
+
     def test_configurable_health_check(self):
         transport = self.connection.transport
         transport.cycle = Mock(name='cycle')
