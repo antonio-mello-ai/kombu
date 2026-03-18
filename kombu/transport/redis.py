@@ -1447,26 +1447,31 @@ class Transport(virtual.Transport):
         def _on_disconnect(connection):
             if connection._sock:
                 loop.remove(connection._sock)
-                # Also prune this connection's file descriptor from the
-                # poller's internal fd map so that on_poll_start does not
-                # re-register stale/disconnected sockets on the next tick.
-                fd = None
+                # Prune the disconnected file descriptor from cycle._fd_to_chan
+                # so that the next on_poll_start tick does not re-register a
+                # stale/disconnected socket.  fileno() returns -1 on a socket
+                # that has been closed (but not yet garbage-collected), so we
+                # only prune when we get a valid (>= 0) file descriptor.
                 sock = connection._sock
+                fd = None
                 try:
                     if hasattr(sock, "fileno"):
-                        fd = sock.fileno()
+                        raw_fd = sock.fileno()
+                        # fileno() returns -1 for a closed-but-not-GC'd socket;
+                        # in that case there is no valid fd to prune.
+                        if raw_fd >= 0:
+                            fd = raw_fd
                     else:
+                        # Plain integer file descriptor (no fileno() method).
                         fd = sock
                 except OSError:
-                    # Socket may already be closed; in that case there is
-                    # nothing further for us to clean up here.
-                    fd = None
-                if fd is not None and hasattr(cycle, "_fd_to_chan"):
-                    fd_to_chan = cycle._fd_to_chan
+                    # Socket already closed at OS level; nothing to prune.
+                    pass
+                if fd is not None:
                     try:
-                        del fd_to_chan[fd]
+                        del cycle._fd_to_chan[fd]
                     except KeyError:
-                        # If the fd is not tracked, we have nothing to prune.
+                        # fd was never tracked or already pruned — safe to ignore.
                         pass
             # Note: we intentionally do NOT remove on_poll_start from
             # loop.on_tick here.  on_poll_start is idempotent — when there

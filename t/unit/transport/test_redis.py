@@ -1339,6 +1339,37 @@ class test_Channel:
         loop.remove.assert_called_once_with(mock_sock)
         assert len(loop.on_tick) == 1
 
+    def test_register_with_event_loop__on_disconnect__fileno_negative(self):
+        """Ensure _on_disconnect skips pruning when fileno() returns -1.
+
+        A socket that has been closed (but not yet GC'd) returns -1 from
+        fileno().  In that case the real fd is gone and _fd_to_chan must
+        NOT be touched (there is no valid key to remove).
+        """
+        transport = self.connection.transport
+        mock_sock = Mock(name='sock')
+        mock_sock.fileno.return_value = -1
+        self.connection._sock = mock_sock
+        transport.cycle = Mock(name='cycle', spec=['fds', '_fd_to_chan',
+                                                   'on_poll_init',
+                                                   'on_poll_start',
+                                                   'maybe_restore_messages',
+                                                   'maybe_check_subclient_health',
+                                                   '_on_connection_disconnect'])
+        transport.cycle.fds = {}
+        # Suppose fd 42 (the original fd before close) is still in the map.
+        transport.cycle._fd_to_chan = {42: Mock(name='chan')}
+        conn = Mock(name='conn')
+        conn.client = Mock(name='client', transport_options={})
+        loop = Mock(name='loop')
+        loop.on_tick = set()
+        redis.Transport.register_with_event_loop(transport, conn, loop)
+        transport.cycle._on_connection_disconnect(self.connection)
+        loop.remove.assert_called_once_with(mock_sock)
+        # _fd_to_chan must be left intact — we had no valid fd to prune.
+        assert 42 in transport.cycle._fd_to_chan
+        assert len(loop.on_tick) == 1
+
     def test_configurable_health_check(self):
         transport = self.connection.transport
         transport.cycle = Mock(name='cycle')
