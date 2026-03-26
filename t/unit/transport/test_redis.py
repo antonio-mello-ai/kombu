@@ -1215,6 +1215,7 @@ class test_Channel:
         self.connection._sock = None
         transport.cycle = Mock(name='cycle')
         transport.cycle.fds = fds
+        transport.cycle._fd_to_chan = {}
         conn = Mock(name='conn')
         conn.client = Mock(name='client', transport_options={})
         loop = Mock(name='loop')
@@ -1368,6 +1369,82 @@ class test_Channel:
         loop.remove.assert_called_once_with(mock_sock)
         # _fd_to_chan must be left intact — we had no valid fd to prune.
         assert 42 in transport.cycle._fd_to_chan
+        assert len(loop.on_tick) == 1
+
+    def test_register_with_event_loop__on_disconnect__sock_none_prunes(self):
+        """Ensure _on_disconnect prunes stale fds when _sock is None.
+
+        In async Redis mode, Connection.disconnect() clears _sock to None
+        before invoking the disconnect callback.  _on_disconnect must still
+        prune cycle._fd_to_chan by scanning for channels backed by the
+        disconnected connection.
+
+        _fd_to_chan stores tuples of (channel, type_string), matching the
+        real data structure used by MultiChannelPoller._register.
+        """
+        transport = self.connection.transport
+        # _sock is None — simulates async Redis disconnect path
+        self.connection._sock = None
+        # Create a channel mock whose client.connection points to self.connection
+        stale_chan = Mock(name='stale_chan')
+        stale_chan.client.connection = self.connection
+        stale_chan.subclient.connection = None
+        # A channel that belongs to a different connection — must NOT be pruned
+        other_conn = Mock(name='other_conn')
+        alive_chan = Mock(name='alive_chan')
+        alive_chan.client.connection = other_conn
+        alive_chan.subclient.connection = None
+        transport.cycle = Mock(name='cycle', spec=['fds', '_fd_to_chan',
+                                                   'on_poll_init',
+                                                   'on_poll_start',
+                                                   'maybe_restore_messages',
+                                                   'maybe_check_subclient_health',
+                                                   '_on_connection_disconnect'])
+        transport.cycle.fds = {}
+        # _fd_to_chan values are (channel, type) tuples in production
+        transport.cycle._fd_to_chan = {
+            10: (stale_chan, 'BRPOP'),
+            20: (alive_chan, 'LISTEN'),
+        }
+        conn = Mock(name='conn')
+        conn.client = Mock(name='client', transport_options={})
+        loop = Mock(name='loop')
+        loop.on_tick = set()
+        redis.Transport.register_with_event_loop(transport, conn, loop)
+        transport.cycle._on_connection_disconnect(self.connection)
+        # loop.remove must NOT be called — there is no socket to remove
+        loop.remove.assert_not_called()
+        # Stale fd must be pruned, alive fd must remain
+        assert 10 not in transport.cycle._fd_to_chan
+        assert 20 in transport.cycle._fd_to_chan
+        # on_poll_start must still be registered
+        assert len(loop.on_tick) == 1
+
+    def test_register_with_event_loop__on_disconnect__sock_none_subclient(self):
+        """Ensure _on_disconnect also matches via subclient.connection.
+
+        _fd_to_chan stores tuples of (channel, type_string).
+        """
+        transport = self.connection.transport
+        self.connection._sock = None
+        stale_chan = Mock(name='stale_chan')
+        stale_chan.client.connection = None
+        stale_chan.subclient.connection = self.connection
+        transport.cycle = Mock(name='cycle', spec=['fds', '_fd_to_chan',
+                                                   'on_poll_init',
+                                                   'on_poll_start',
+                                                   'maybe_restore_messages',
+                                                   'maybe_check_subclient_health',
+                                                   '_on_connection_disconnect'])
+        transport.cycle.fds = {}
+        transport.cycle._fd_to_chan = {30: (stale_chan, 'BRPOP')}
+        conn = Mock(name='conn')
+        conn.client = Mock(name='client', transport_options={})
+        loop = Mock(name='loop')
+        loop.on_tick = set()
+        redis.Transport.register_with_event_loop(transport, conn, loop)
+        transport.cycle._on_connection_disconnect(self.connection)
+        assert 30 not in transport.cycle._fd_to_chan
         assert len(loop.on_tick) == 1
 
     def test_configurable_health_check(self):
